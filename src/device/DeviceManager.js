@@ -1,8 +1,13 @@
 const UUID_SERVICE = "6ceba000-76de-441e-89bc-0de0079db615";
 const UUID_BLECHAR_COMMAND = "6ceba001-76de-441e-89bc-0de0079db615";
-const UUID_BLECHAR_SCREEN = "6ceba010-76de-441e-89bc-0de0079db615";
-const UUID_BLECHAR_SCREEN_PATCH = "6ceba011-76de-441e-89bc-0de0079db615";
 const RECONNECT_DELAY_SECONDS = 3;
+
+const UUIDS_BLOCK = [
+  "6ceba021-76de-441e-89bc-0de0079db615",
+  "6ceba022-76de-441e-89bc-0de0079db615",
+  "6ceba023-76de-441e-89bc-0de0079db615",
+  "6ceba024-76de-441e-89bc-0de0079db615",
+];
 
 export default class DeviceManager {
   /** @type {BluetoothDevice | null} */
@@ -22,6 +27,8 @@ export default class DeviceManager {
 
   /** @type {BluetoothRemoteGATTCharacteristic | null} */
   screen_patch_char = null;
+
+  block_chars = [];
 
   /** @type {(connected: boolean) => void | null} */
   onConnectionChange = null;
@@ -102,13 +109,19 @@ export default class DeviceManager {
     this.tx_characteristic = await this.service.getCharacteristic(
       UUID_BLECHAR_COMMAND
     );
-    this.screen_characteristic = await this.service.getCharacteristic(
-      UUID_BLECHAR_SCREEN
-    );
-    this.screen_patch_char = await this.service.getCharacteristic(
-      UUID_BLECHAR_SCREEN_PATCH
-    );
+
     console.log("service + characteristics obtained");
+
+    for (const uuid of UUIDS_BLOCK) {
+      const c = await this.service.getCharacteristic(uuid);
+      this.block_chars.push(c);
+
+      c.addEventListener("characteristicvaluechanged", (event) => {
+        const num = UUIDS_BLOCK.indexOf(uuid);
+        this.onScreenBlock(num, event.target.value);
+      });
+      await c.startNotifications();
+    }
 
     device.addEventListener("gattserverdisconnected", () => {
       console.log("device disconnected");
@@ -116,8 +129,7 @@ export default class DeviceManager {
       this.server = null;
       this.service = null;
       this.tx_characteristic = null;
-      this.screen_characteristic = null;
-      this.screen_patch_char = null;
+      this.block_chars = [];
 
       if (this.onConnectionChange) this.onConnectionChange(false);
 
@@ -129,21 +141,7 @@ export default class DeviceManager {
       }
     });
 
-    this.screen_patch_char.addEventListener(
-      "characteristicvaluechanged",
-      (event) => {
-        console.log("notify read", event.target.value.byteLength);
-        // const value = event.target.value; // a DataView
-        this.readScreen();
-      }
-    );
-    await this.screen_patch_char.startNotifications();
-
     this.readScreen();
-
-    // setInterval(() => {
-    //   this.readScreen();
-    // }, 2000);
   }
 
   async _attemptReconnect() {
@@ -204,33 +202,34 @@ export default class DeviceManager {
   onScreenData = null;
 
   async readScreen() {
-    if (!this.screen_characteristic || !this.tx_characteristic) return;
+    if (!this.tx_characteristic) return;
 
-    const page_cmd = new Uint8Array(2);
+    const pages_data_rle = [];
 
-    const pages = [];
-
-    console.time("screen_data");
-    page_cmd.set([0x02, 0]);
-    await this.tx_characteristic.writeValue(page_cmd);
-
-    for (let i = 0; i < 4; i++) {
-      /** @type {DataView} */
-      const page_data_rle = await this.screen_characteristic.readValue();
-      console.log(page_data_rle.byteLength);
-      const page_data = rleDecompress(page_data_rle);
-      pages.push(page_data);
+    for (const c of this.block_chars) {
+      const pd_rle = await c.readValue();
+      pages_data_rle.push(pd_rle);
     }
-    console.timeEnd("screen_data");
+
+    this._bufferUpdate(pages_data_rle);
+  }
+
+  _bufferUpdate(pages_data_rle) {
+    const pages_data = [];
+
+    for (const page_data_rle of pages_data_rle) {
+      const page_data = rleDecompress(page_data_rle);
+      pages_data.push(page_data);
+    }
 
     let offset = 0;
 
-    for (const page of pages) {
+    for (const pd of pages_data) {
       this.screen_data.set(
-        new Uint8Array(page.buffer, page.byteOffset, page.byteLength),
+        new Uint8Array(pd.buffer, pd.byteOffset, pd.byteLength),
         offset
       );
-      offset += page.byteLength;
+      offset += pd.byteLength;
     }
 
     if (this.onScreenData) this.onScreenData();
@@ -241,8 +240,17 @@ export default class DeviceManager {
     return Boolean(byte);
   }
 
-  onScreenPatch(value) {
-    console.log("patch", value);
+  partial_block_data = [null, null, null, null];
+
+  onScreenBlock(i, data) {
+    console.log(i, data);
+
+    this.partial_block_data[i] = data;
+
+    if (this.partial_block_data.every((x) => x != null)) {
+      this._bufferUpdate(this.partial_block_data);
+      this.partial_block_data = [null, null, null, null];
+    }
   }
 }
 

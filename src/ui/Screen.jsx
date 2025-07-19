@@ -1,4 +1,4 @@
-import { onMount } from "solid-js";
+import { onCleanup, onMount } from "solid-js";
 import { deviceManager } from "../store";
 
 const PIXEL_W = 128;
@@ -23,6 +23,10 @@ export default function Screen() {
     deviceManager.onScreenData = () => renderScreen(ctx, canvas);
 
     deviceManager.readScreen();
+  });
+
+  onCleanup(() => {
+    deviceManager.onScreenData = null;
   });
 
   return <div class="overflow-clip rounded-md shadow">{canvas}</div>;
